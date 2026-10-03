@@ -24,7 +24,9 @@ def main():
         if C.TOKEN["source"] != "env":
             token_info += " (env value ignored until DELETE /state)"
     log(f"delay_relay up: {C.APP_IN} -> {C.APP_OUT}, default {C.STATE['default_delay']}s, map {C.DELAY_MAP}, "
-        f"control :{C.CONTROL_PORT}, publish token {token_info}, own address {C.OWN_IP or 'unknown (hook ip check off)'}")
+        f"control :{C.CONTROL_PORT}, publish token {token_info}, own address {C.OWN_IP or 'unknown (hook ip check off)'}, "
+        f"ffmpeg {'.'.join(map(str, C.FFMPEG_VERSION)) if C.FFMPEG_VERSION else 'unknown'}, pull {C.PULL}"
+        f"{'' if C.PULL != 'auto' else (' (HTTP-FLV for every codec)' if C.FFMPEG_READS_SRS6_HEVC_FLV else ' (H.265 on SRS 6 over SRT)')}")
     threading.Thread(target=S.supervise, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", C.CONTROL_PORT), Control).serve_forever()
 

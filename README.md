@@ -62,8 +62,10 @@ publish into `live/` — an SRT encoder cannot skip the token or the delay.
   have nobody to ask); connected publishers and viewers continue.
 - Codecs: H.264 (tested over RTMP) and H.265 (tested over SRT ingest), AAC audio. The delayed copy is
   delivered as enhanced RTMP: players need ffmpeg ≥ 6.1 or OBS ≥ 30. SRS 6 (the default, stable line) writes
-  H.265 into FLV as legacy codec id 12 — the relay pulls such sources over SRT instead (adding SRS's SRT
-  latency to the delay), and anything else reading `source/` H.265 straight from SRS 6 needs ffmpeg ≥ 7.1
+  H.265 into FLV as legacy codec id 12; the relay image (Alpine 3.24, ffmpeg 8.1.2) reads that, so the relay
+  pulls every codec over HTTP-FLV on SRS 6 and 7 alike. Built with an older ffmpeg it falls back to SRT for
+  H.265 on SRS 6, which adds SRS's SRT latency (~250 ms) to the delay (`PULL=srt|flv` forces a path; `/health`
+  shows the ffmpeg version and mode). Anything else reading `source/` H.265 straight from SRS 6 needs ffmpeg ≥ 7.1
   (OBS ≥ 31). `SRS_IMAGE=docker.io/ossrs/srs:7` (develop line) emits enhanced RTMP everywhere; both are tested.
 - Delays are bounded by `MAX_DELAY_SECONDS` and all buffers together by `MAX_BUFFER_MB` (RAM per stream
   ≈ bitrate × delay). Keep `RELAY_MEM_LIMIT` above that.

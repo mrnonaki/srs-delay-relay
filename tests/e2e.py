@@ -260,12 +260,21 @@ def main():
 
         srt = "srt://srs:10080?streamid=#!::r=source/h1,m=publish&latency=120000"
         subprocess.Popen([ENGINE, "exec", LAB, "sh", "-c",
-                          f"timeout 60 ffmpeg -hide_banner -loglevel error -re -f lavfi -i testsrc2=s=320x180:r=30 -c:v libx265 "
-                          f"-preset ultrafast -g 30 -b:v 400k -f mpegts '{srt}'"], stderr=subprocess.DEVNULL)
+                          f"timeout 60 ffmpeg -hide_banner -loglevel error -re -f lavfi -i testsrc2=s=320x180:r=30 "
+                          f"-f lavfi -i sine=f=440:r=48000 -c:v libx265 -preset ultrafast -g 30 -b:v 400k "
+                          f"-c:a aac -b:a 64k -f mpegts '{srt}'"], stderr=subprocess.DEVNULL)
         time.sleep(18)
         codec = lab("timeout", "15", "ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=codec_name",
                     "-of", "csv=p=0", f"{EDGE}/live/h1").stdout.strip()
         check(codec == "hevc" and play(f"{EDGE}/live/h1"), f"12 H.265 over SRT -> relay -> edge plays as {codec or 'nothing'}")
+        audio = lab("timeout", "20", "ffmpeg", "-hide_banner", "-loglevel", "error", "-analyzeduration", "10000000",
+                    "-probesize", "10000000", "-i", f"{EDGE}/live/h1", "-map", "0:a:0", "-t", "3", "-f", "null", "-")
+        check(audio.returncode == 0, f"12b the H.265 stream keeps its AAC audio through the relay ({audio.stderr.strip()[-80:]})")
+        health = api("GET", "/health", auth=False)
+        start_lines = [l for l in logs("delay-relay").splitlines() if "[h1] start" in l]
+        check(start_lines and not any("pulled over SRT" in l for l in start_lines) and str(health.get("ffmpeg", "")).startswith("8")
+              and health.get("pull") == "auto",
+              f"12c H.265 read over HTTP-FLV on SRS {health.get('srs_major')} (ffmpeg {health.get('ffmpeg')}, pull {health.get('pull')})")
         first = subprocess.Popen([ENGINE, "exec", LAB, "timeout", "12", "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", f"{EDGE}/live/h1",
                                   "-t", "8", "-f", "null", "-"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         time.sleep(2)
