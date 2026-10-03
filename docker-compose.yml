@@ -1,0 +1,119 @@
+# Three plain services. Copy .env.example to .env, set PUBLISH_TOKEN, CONTROL_TOKEN and LAN_BIND, then: docker compose up -d
+#   srs          ossrs/srs:6, env-only config (tuned for low delay), static IP so the edge's nginx (which resolves names
+#                once at start) survives SRS restarts. LAN only: 1985 API, 8080 HTTP-FLV, 10080/udp SRT. RTMP not published.
+#   delay-relay  mirrors APP_IN/<name> -> APP_OUT/<name> with the configured delay; control API on CONTROL_PORT (LAN only,
+#                never forward it); answers the edge's publish-token check on /auth. Static IP for the same reason.
+#   edge         SRS in edge mode, THE ONLY PORT YOU FORWARD (EDGE_PORT): outsiders publish rtmp://public/APP_IN/<name>?token=..
+#                and play rtmp://public/APP_OUT/<name> (delayed copy, no token). The relay's hooks allow nothing else.
+#   SRT encoders : srt://host:10080  streamid #!::r=APP_IN/<name>,m=publish  (any SRT caller)
+#   OBS/control  : http://host:8080/APP_IN/<name>.flv  (no delay)
+#   publish guard: SRS asks the relay (on_publish hook) before accepting any publish: encoders may publish APP_IN;
+#                  only the relay itself may publish APP_OUT (an SRT encoder cannot skip token and delay)
+# Change SRT latency: PUT :9090/srs/srt-latency?ms=N (rewrites config/srt.env; GET shows pending/applied). Applied by
+#                     scripts/apply-srt.sh — put it in cron (`* * * * * /path/delay_relay/scripts/apply-srt.sh`) or a
+#                     systemd timer, or run it by hand (= `docker compose up -d srs`, ~3 s outage). Rotate token: PUT :9090/edge/token?value=NEW (immediate, no restart;
+#                     kept in the relay's state volume and wins over .env until DELETE /state).
+# Podman: `podman compose` works (docker-compose or podman-compose); SELinux hosts: add :z to the ./config bind; containers
+#         only come back after a reboot with podman-restart.service (or quadlet) enabled.
+services:
+  srs:
+    image: ${SRS_IMAGE:-docker.io/ossrs/srs:6}          # 6 = stable line; see SRS_IMAGE in .env.example about H.265 readers
+    restart: unless-stopped
+    env_file: ${CONFIG_DIR:-./config}/srt.env                           # the three SRS_SRT_SERVER_*LATENCY keys; the relay rewrites this file
+    environment:
+      SRS_SRT_SERVER_ENABLED: "on"
+      SRS_SRT_SERVER_LISTEN: "10080"
+      SRS_SRT_SERVER_TLPKTDROP: "on"
+      SRS_SRT_SERVER_TSBPDMODE: "on"
+      SRS_SRT_SERVER_PEER_IDLE_TIMEOUT: "5000"
+      SRS_SRT_SERVER_DEFAULT_APP: ${APP_IN:-source}       # SRT without r= lands in APP_IN, never in the public app
+      SRS_VHOST_SRT_ENABLED: "on"
+      SRS_VHOST_SRT_TO_RTMP: "on"
+      SRS_VHOST_TCP_NODELAY: "on"
+      SRS_VHOST_MIN_LATENCY: "on"
+      SRS_VHOST_PLAY_MW_LATENCY: "1"                      # NOT 0: 0 busy-loops SRS at 100% CPU with any HTTP-FLV consumer
+      SRS_VHOST_PLAY_MW_MSGS: "1"
+      SRS_VHOST_PLAY_GOP_CACHE: "on"
+      SRS_VHOST_PUBLISH_MR: "off"
+      SRS_VHOST_PUBLISH_NORMAL_TIMEOUT: "5000"            # keep MAX_PAUSE_SECONDS below this
+      SRS_VHOST_PUBLISH_FIRSTPKT_TIMEOUT: "5000"
+      SRS_VHOST_HTTP_REMUX_ENABLED: "on"
+      SRS_VHOST_HTTP_REMUX_MOUNT: "[vhost]/[app]/[stream].flv"
+      SRS_VHOST_HLS_ENABLED: "off"
+      SRS_RTC_SERVER_ENABLED: "off"
+      SRS_HTTP_API_ENABLED: "on"
+      SRS_HTTP_SERVER_ENABLED: "on"
+      SRS_VHOST_HTTP_HOOKS_ENABLED: "on"
+      SRS_VHOST_HTTP_HOOKS_ON_PUBLISH: http://${SUBNET_PREFIX:-172.30.77}.11:9090/srs/on_publish
+      SRS_LOG_LEVEL_V2: "info"                            # trace < debug < info < warn < error; "warn" for a quiet log
+    ports:                                               # LAN_BIND: the LAN address these listen on (never a public one)
+      - "${LAN_BIND:?set LAN_BIND in .env (LAN address, or 0.0.0.0 on a NAT-only host)}:${SRS_API_PORT:-1985}:1985"
+      - "${LAN_BIND}:${SRS_HTTP_PORT:-8080}:8080"
+      - "${LAN_BIND}:${SRS_SRT_PORT:-10080}:10080/udp"
+    networks:
+      default:
+        ipv4_address: ${SUBNET_PREFIX:-172.30.77}.10
+    logging: {driver: json-file, options: {max-size: "20m", max-file: "3"}}
+
+  delay-relay:
+    build: .
+    restart: unless-stopped
+    depends_on: [srs, edge]      # stop order = relay first: it plays out its buffers while srs + edge still serve viewers
+    environment:
+      SRS_API: http://srs:1985
+      SRS_HTTP: http://srs:8080
+      SRS_RTMP: rtmp://srs:1935
+      APP_IN: ${APP_IN:-source}
+      APP_OUT: ${APP_OUT:-live}
+      PUBLISH_TOKEN: ${PUBLISH_TOKEN:?set PUBLISH_TOKEN in .env (8-128 chars [A-Za-z0-9_.-])}
+      DELAY_SECONDS: ${DELAY_SECONDS:-2}
+      DELAY_MAP: ${DELAY_MAP:-}
+      MAX_DELAY_SECONDS: ${MAX_DELAY_SECONDS:-300}
+      MAX_BUFFER_MB: ${MAX_BUFFER_MB:-1024}
+      MAX_STREAMS: ${MAX_STREAMS:-32}
+      MAX_BUFFER_EXTRA_SECONDS: ${MAX_BUFFER_EXTRA_SECONDS:-15}
+      MAX_PAUSE_SECONDS: ${MAX_PAUSE_SECONDS:-3}           # keep below SRS_VHOST_PUBLISH_NORMAL_TIMEOUT (5 s)
+      POLL_SECONDS: ${POLL_SECONDS:-3}
+      CONTROL_PORT: "9090"
+      CONTROL_TOKEN: ${CONTROL_TOKEN:?set CONTROL_TOKEN in .env (the control API can lock encoders out)}
+      STATE_FILE: /data/state.json
+      SRT_ENV_FILE: /config/srt.env
+      STOP_GRACE_SECONDS: ${STOP_GRACE_SECONDS:-60}
+    volumes:
+      - relay-state:/data
+      - ${CONFIG_DIR:-./config}:/config                # rw: PUT /srs/srt-latency rewrites srt.env here (CONFIG_DIR: ./ or absolute)
+    ports:
+      - "${LAN_BIND}:${CONTROL_PORT:-9090}:9090"      # LAN only; never port-forward
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]      # root in the container must still write ./config (owned by the deploying user)
+    security_opt: [no-new-privileges:true]
+    networks:
+      default:
+        ipv4_address: ${SUBNET_PREFIX:-172.30.77}.11
+    mem_limit: ${RELAY_MEM_LIMIT:-2200m}               # ~ MAX_BUFFER_MB x 1.2 + 15 MB x 2 ffmpeg x MAX_STREAMS (OOM = PID 1 = all buffers lost)
+    stop_grace_period: ${STOP_GRACE_SECONDS:-60}s      # on stop the relay plays out its buffers first (longest delay + 15 s, capped here)
+    logging: {driver: json-file, options: {max-size: "20m", max-file: "3"}}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  edge:
+    image: ${SRS_IMAGE:-docker.io/ossrs/srs:6}          # a second SRS in edge mode: the only service you port-forward
+    restart: unless-stopped
+    command: ./objs/srs -c conf/edge.conf                # no depends_on: the edge boots and serves viewers even while srs/relay are down
+    volumes:
+      - ./edge/srs-edge.conf:/usr/local/srs/conf/edge.conf:ro   # cluster mode has no env override; the file holds no secrets
+    ports:
+      - "${EDGE_PORT:-1935}:1935"                      # the ONLY port to forward
+    logging: {driver: json-file, options: {max-size: "20m", max-file: "3"}}
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${SUBNET_PREFIX:-172.30.77}.0/24     # change SUBNET_PREFIX in .env if it clashes with your LAN
+
+volumes:
+  relay-state:
