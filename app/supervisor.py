@@ -16,8 +16,23 @@ failures = {}          # name -> consecutive relays that never produced output (
 _limit_logged_at = [0.0]
 OUT_KBPS = {}          # APP_OUT stream -> kbps SRS received over the last 30 s (0 = publisher connected but silent)
 CODEC = {}             # APP_IN stream -> video codec SRS reports ("H264", "HEVC", ...)
-HEALTH = {"srs_api_ok": False, "srs_server": None, "srs_major": None}   # srs_server: new id on every SRS restart
-_codec_deferred = set()   # streams seen once without codec info: wait one poll before choosing how to pull them
+HEALTH = {"srs_api_ok": False, "srs_server": None, "srs_major": None,   # srs_server: new id on every SRS restart
+          "ffmpeg": ".".join(map(str, C.FFMPEG_VERSION)) if C.FFMPEG_VERSION else None, "pull": C.PULL}
+_codec_deferred = set()   # streams seen once without codec info: wait one poll before starting their relay
+
+
+def codec_decides_pull():
+    """True only where the pull path depends on the codec: PULL=auto, SRS < 7 and an ffmpeg that cannot read SRS 6's
+    H.265 FLV. Everywhere else every stream is read over HTTP-FLV (or SRT when forced)."""
+    return C.PULL == "auto" and not C.FFMPEG_READS_SRS6_HEVC_FLV and (HEALTH["srs_major"] or 0) < 7
+
+
+def pull_via_srt(codec):
+    if C.PULL != "auto":
+        return C.PULL == "srt"
+    return codec == "HEVC" and codec_decides_pull()
+
+
 SHUTTING_DOWN = [False]
 _api_error_logged_at = [0.0]
 
@@ -123,12 +138,14 @@ def _reconcile(now, want):
             break
         predecessor = next((d for d in reversed(draining) if d.name_ == name and not d.stop), None)   # the newest one
         if CODEC.get(name) is None and name not in _codec_deferred:
-            _codec_deferred.add(name)                    # SRS lists a stream before its first key frame: look again next poll
+            # SRS lists a stream before its first key frame / sequence header; a reader started that early gets EOF,
+            # dies without output and lands in backoff. Wait one poll for every codec, not only where it picks the path.
+            _codec_deferred.add(name)
             continue
         _codec_deferred.discard(name)
-        # SRS 6 writes H.265 into FLV as legacy codec id 12 that ffmpeg cannot demux (an H.265+audio source would
-        # come out audio-only): on SRS < 7 pull H.265 sources over SRT (plain MPEG-TS). SRS 7 emits enhanced RTMP.
-        via_srt = CODEC.get(name) == "HEVC" and (HEALTH["srs_major"] or 0) < 7
+        # SRS 6 writes H.265 into FLV as legacy codec id 12. The relay image's ffmpeg 8 reads it, so everything is pulled
+        # over HTTP-FLV; with an older ffmpeg, H.265 on SRS < 7 falls back to SRT (adds SRS's SRT latency, ~250 ms).
+        via_srt = pull_via_srt(CODEC.get(name))
         relay = Relay(name, C.DELAY_MAP.get(name, C.STATE["default_delay"]), after=predecessor, via_srt=via_srt)
         relays[name] = relay
         relay.start()

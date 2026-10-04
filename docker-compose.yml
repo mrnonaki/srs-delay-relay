@@ -74,6 +74,7 @@ services:
       MAX_BUFFER_EXTRA_SECONDS: ${MAX_BUFFER_EXTRA_SECONDS:-15}
       MAX_PAUSE_SECONDS: ${MAX_PAUSE_SECONDS:-3}           # keep below SRS_VHOST_PUBLISH_NORMAL_TIMEOUT (5 s)
       POLL_SECONDS: ${POLL_SECONDS:-3}
+      PULL: ${PULL:-auto}                                  # auto | flv | srt (how the relay reads source/)
       CONTROL_PORT: "9090"
       CONTROL_TOKEN: ${CONTROL_TOKEN:?set CONTROL_TOKEN in .env (the control API can lock encoders out)}
       STATE_FILE: /data/state.json

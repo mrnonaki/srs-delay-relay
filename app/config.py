@@ -17,7 +17,7 @@ def log(*parts):
 SRS_API = os.environ.get("SRS_API", "http://srs:1985")
 SRS_HTTP = os.environ.get("SRS_HTTP", "http://srs:8080")
 SRS_RTMP = os.environ.get("SRS_RTMP", "rtmp://srs:1935")
-SRS_SRT = os.environ.get("SRS_SRT", "srt://srs:10080")   # HEVC sources are pulled over SRT (see relay._spawn)
+SRS_SRT = os.environ.get("SRS_SRT", "srt://srs:10080")   # fallback pull path for H.265 on SRS 6 (see supervisor.pull_via_srt)
 APP_IN = os.environ.get("APP_IN", "source")      # encoders publish here; the control room pulls here (no delay)
 APP_OUT = os.environ.get("APP_OUT", "live")      # the delayed copy; the edge lets outsiders play it
 
@@ -65,6 +65,23 @@ STATE_FILE = os.environ.get("STATE_FILE", "/data/state.json")
 SRT_ENV_FILE = os.environ.get("SRT_ENV_FILE", "/config/srt.env")
 SRT_KEYS = ("SRS_SRT_SERVER_LATENCY", "SRS_SRT_SERVER_RECVLATENCY", "SRS_SRT_SERVER_PEERLATENCY")
 FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
+
+
+def ffmpeg_version():
+    """(major, minor, ...) of the ffmpeg binary, or None when it cannot be run or is a git build ('N-12345-g...')."""
+    import subprocess
+    try:
+        out = subprocess.run([FFMPEG, "-version"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.match(r"ffmpeg version n?(\d+)\.(\d+)(?:\.(\d+))?", out)
+    return tuple(int(x) for x in m.groups() if x is not None) if m else None
+
+
+FFMPEG_VERSION = ffmpeg_version()
+# SRS 6 writes H.265 into FLV as legacy codec id 12. ffmpeg 8.1.2 (Alpine 3.24, the relay image) demuxes it; 6.1 does not.
+# Only 8.x is tested, so older builds keep the SRT fallback.
+FFMPEG_READS_SRS6_HEVC_FLV = FFMPEG_VERSION is not None and FFMPEG_VERSION >= (8,)
 CHUNK = 188 * 7                                  # one read from the source ffmpeg = 7 TS packets
 
 
@@ -109,6 +126,16 @@ STATE = {
     "srt_pending_server": None,                  # SRS server id when srt.env was last written (None = nothing pending)
 }
 ENV_DELAY_MAP = _env_or_exit("DELAY_MAP", lambda: _parse_delay_map(os.environ.get("DELAY_MAP", "")))
+
+
+def _parse_pull(value):
+    value = (value or "auto").strip().lower()
+    if value not in ("auto", "flv", "srt"):
+        raise ValueError(f"{value!r} must be auto, flv or srt")
+    return value
+
+
+PULL = _env_or_exit("PULL", lambda: _parse_pull(os.environ.get("PULL", "auto")))   # how the relay reads APP_IN
 DELAY_MAP = dict(ENV_DELAY_MAP)                  # effective per-stream delays
 DELAY_OVERRIDES = {}                             # the ones set through the API (persisted, win over env)
 ENV_TOKEN = os.environ.get("PUBLISH_TOKEN", "")

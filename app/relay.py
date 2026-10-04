@@ -34,7 +34,7 @@ class Relay(threading.Thread):
         self.name_ = name
         self.delay = C.parse_delay(delay)
         self.after = after            # predecessor still playing out APP_OUT/<name>: our first write waits for it
-        self.via_srt = via_srt        # pull the source over SRT (MPEG-TS) instead of HTTP-FLV
+        self.via_srt = via_srt        # pull the source over SRT (MPEG-TS) instead of HTTP-FLV (fallback, see supervisor)
         self.state = "starting"
         self.stop = False             # final: set by _finish after reaping, or by terminate() while it kills
         self.eof = False              # source ended
@@ -121,8 +121,8 @@ class Relay(threading.Thread):
 
     # --- threads ------------------------------------------------------------------------------
     def _spawn(self):
-        # via_srt: on SRS < 7 (HEVC written into FLV as legacy codec id 12, which ffmpeg cannot demux) the source
-        # is pulled over SRT as plain MPEG-TS instead. Publishing always uses enhanced RTMP.
+        # via_srt: fallback for an ffmpeg that cannot demux SRS 6's H.265 FLV (legacy codec id 12) or PULL=srt; the
+        # source is then pulled over SRT as plain MPEG-TS. Publishing always uses enhanced RTMP.
         if self.via_srt:
             src = f"{C.SRS_SRT}?streamid=#!::r={C.APP_IN}/{self.name_},m=request&latency=120000"
         else:
@@ -207,7 +207,7 @@ class Relay(threading.Thread):
 
     def run(self):
         log(f"[{self.name_}] start delay={self.delay}s {C.APP_IN}/{self.name_} -> {C.APP_OUT}/{self.name_}"
-            f"{' (HEVC: pulled over SRT)' if self.via_srt else ''}")
+            f"{' (pulled over SRT)' if self.via_srt else ''}")
         try:
             self._spawn()
         except Exception as e:                                # ffmpeg missing / fork failure: never stay 'starting'
